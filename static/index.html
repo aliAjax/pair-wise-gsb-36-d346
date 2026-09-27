@@ -1,18 +1,63 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>水资源权配置</title>
-<style>body{font:15px/1.5 system-ui,sans-serif;max-width:980px;margin:32px auto;padding:0 18px}input,select,button{padding:7px;margin:3px}.card{border:1px solid #d9e1e8;border-radius:10px;padding:16px;margin:16px 0}pre{background:#f5f7f9;padding:12px;overflow:auto}small{color:#667}button{cursor:pointer}</style></head>
-<body><h1>跨区域水资源使用权</h1><p>示例账户初始化后，可查看余额、发起转让、审核，并模拟干旱分配。</p>
-<div class="card"><h2>身份</h2><input id="user" value="alice"><select id="role"><option>editor</option><option>reviewer</option><option>meter</option><option>viewer</option></select></div>
+<style>body{font:15px/1.5 system-ui,sans-serif;max-width:980px;margin:32px auto;padding:0 18px}input,select,button{padding:7px;margin:3px}.card{border:1px solid #d9e1e8;border-radius:10px;padding:16px;margin:16px 0}pre{background:#f5f7f9;padding:12px;overflow:auto}small{color:#667}button{cursor:pointer}.ledger-account{border:1px solid #cdd8e2;border-radius:8px;margin:10px 0;overflow:hidden}.ledger-account>h3{margin:0;padding:10px 14px;background:#eef3f8;font-size:15px}.usage-record{border-top:1px solid #e2e8ee;padding:10px 14px}.usage-record header{display:flex;flex-wrap:wrap;gap:6px 16px;align-items:baseline}.usage-record .event{font-weight:600}.reversal{margin:4px 0 4px 18px;color:#555;font-size:13px}.reverse-form{margin:8px 0 0 18px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}.reverse-form input{padding:5px}.tag{font-size:12px;padding:1px 8px;border-radius:10px;background:#e3edf7;color:#23527c}.tag.done{background:#e9f5ec;color:#1e6b35}</style></head>
+<body><h1>跨区域水资源使用权</h1><p>示例账户初始化后，可查看余额、发起转让、审核、登记取水与冲正，并模拟干旱分配。</p>
+<div class="card"><h2>身份</h2><input id="user" value="alice"><select id="role"><option>editor</option><option>reviewer</option><option selected>meter</option><option>viewer</option></select></div>
 <div class="card"><h2>账户</h2><button onclick="getAccounts()">刷新账户</button><pre id="accounts">等待操作…</pre></div>
 <div class="card"><h2>发起转让</h2><input id="from" type="number" value="1" placeholder="转出账户"><input id="to" type="number" value="2" placeholder="转入账户"><input id="amount" type="number" value="400"><input id="date" type="date" value="2026-06-01"><button onclick="transfer()">提交审批</button><pre id="result"></pre></div>
 <div class="card"><h2>审批最新转让</h2><input id="transfer_id" type="number" placeholder="转让 ID"><button onclick="approve()">批准</button><button onclick="reject()">退回</button></div>
+<div class="card"><h2>登记取水</h2><input id="u_account" type="number" value="1" placeholder="账户 ID" style="width:90px"><input id="u_amount" type="number" value="50" placeholder="取水量" style="width:100px"><input id="u_event" value="UP-2026-0002" placeholder="计量事件编号" style="width:160px"><input id="u_date" type="date" value="2026-07-15"><button onclick="recordUsage()">登记</button><pre id="usageResult"></pre></div>
+<div class="card"><h2>计量冲正</h2><p><small>冲正必须从原取水记录发起，填写原因和经办人；同一原单可分次冲回，累计不超过原取水量。确认后同步释放账户已用量和原单当月季节用量。</small></p><button onclick="loadLedger()">刷新冲正台账</button><div id="ledger">等待操作…</div></div>
 <div class="card"><h2>干旱情景</h2><input id="supply" type="number" value="1200"><input id="reduction" type="number" value="0.3" step="0.1"><button onclick="simulate()">模拟</button><pre id="drought">等待操作…</pre></div>
 <script>
 const headers=()=>({'Content-Type':'application/json','X-User':user.value,'X-Role':role.value});
 async function call(url,opts={}){const r=await fetch(url,opts);const j=await r.json();if(!r.ok)throw Error(j.error||r.status);return j}
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=n=>Math.round(n*1e6)/1e6;
 async function getAccounts(){try{accounts.textContent=JSON.stringify(await call('/api/accounts'),null,2)}catch(e){accounts.textContent=e.message}}
 async function transfer(){try{result.textContent=JSON.stringify(await call('/api/transfers',{method:'POST',headers:headers(),body:JSON.stringify({from_account_id:+from.value,to_account_id:+to.value,amount:+amount.value,effective_date:date.value})}),null,2)}catch(e){result.textContent=e.message}}
 async function approve(){try{result.textContent=JSON.stringify(await call('/api/transfers/'+transfer_id.value+'/approve',{method:'POST',headers:headers(),body:'{}'}),null,2)}catch(e){result.textContent=e.message}}
 async function reject(){try{result.textContent=JSON.stringify(await call('/api/transfers/'+transfer_id.value+'/reject',{method:'POST',headers:headers(),body:'{}'}),null,2)}catch(e){result.textContent=e.message}}
 async function simulate(){try{drought.textContent=JSON.stringify(await call('/api/drought/simulate?supply='+supply.value+'&reduction='+reduction.value),null,2)}catch(e){drought.textContent=e.message}}
+async function recordUsage(){try{usageResult.textContent=JSON.stringify(await call('/api/usage',{method:'POST',headers:headers(),body:JSON.stringify({account_id:+u_account.value,amount:+u_amount.value,meter_event_id:u_event.value,occurred_at:u_date.value})}),null,2);loadLedger()}catch(e){usageResult.textContent=e.message}}
+async function loadLedger(){
+  try{
+    const data=await call('/api/usage');
+    if(!data.ledger.length){ledger.textContent='暂无取水记录';return}
+    ledger.innerHTML=data.ledger.map(acct=>`
+      <div class="ledger-account"><h3>账户 #${acct.account_id} ${esc(acct.account_name)} <small>${esc(acct.region)}</small></h3>
+      ${acct.records.map(rec=>{
+        const u=rec.usage;
+        const done=rec.remaining_reversible<=1e-9;
+        return `<div class="usage-record">
+          <header><span class="event">原单 #${u.id} · 事件 ${esc(u.meter_event_id)}</span>
+          <span>取水 ${fmt(u.amount)}（${esc(u.occurred_at)}，计量员 ${esc(u.actor)}）</span>
+          <span>已冲 ${fmt(rec.reversed_total)}</span>
+          <span class="tag ${done?'done':''}">剩余可冲 ${fmt(rec.remaining_reversible)}${done?' · 已冲完':''}</span></header>
+          ${rec.reversals.map(r=>`<div class="reversal">↩ 冲正单 #${r.id}：${fmt(r.amount)}，原因：${esc(r.reason)}，经办人：${esc(r.operator)}，${esc(r.created_at)}</div>`).join('')}
+          ${done?'':`<div class="reverse-form">
+            <input data-amount type="number" step="any" min="0" max="${rec.remaining_reversible}" value="${fmt(rec.remaining_reversible)}" style="width:110px" placeholder="本次冲正量">
+            <input data-reason placeholder="冲正原因（如重复登记）" style="width:220px">
+            <input data-operator value="${esc(user.value)}" placeholder="经办人" style="width:120px">
+            <button onclick="reverseUsage(${u.id},this)">确认冲正</button><span data-msg></span>
+          </div>`}
+        </div>`;
+      }).join('')}
+      </div>`;
+    }).join('');
+  }catch(e){ledger.textContent=e.message}
+}
+async function reverseUsage(usageId,btn){
+  const form=btn.parentElement,msg=form.querySelector('[data-msg]');
+  const amount=+form.querySelector('[data-amount]').value;
+  const reason=form.querySelector('[data-reason]').value.trim();
+  const operator=form.querySelector('[data-operator]').value.trim();
+  msg.textContent='提交中…';
+  try{
+    const r=await call('/api/usage/reverse',{method:'POST',headers:headers(),body:JSON.stringify({usage_id:usageId,amount,reason,operator})});
+    msg.textContent='已生成冲正单 #'+r.id;
+    loadLedger();getAccounts();
+  }catch(e){msg.textContent='✗ '+e.message}
+}
+loadLedger();
 </script></body></html>

@@ -2,40 +2,27 @@
 from __future__ import annotations
 
 import argparse
-import calendar
+import calendar  # noqa: F401
 import json
 import os
 import sqlite3
-from datetime import date, datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from common import DomainError, parse_date, utcnow
+from reversals import CorrectionService, ReversalStore
+
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "water_rights.db"
-
-
-def utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def parse_date(value: str, field: str = "日期") -> date:
-    try:
-        return date.fromisoformat(value)
-    except (TypeError, ValueError) as exc:
-        raise DomainError(f"{field}必须是 YYYY-MM-DD") from exc
-
-
-class DomainError(Exception):
-    def __init__(self, message: str, status: int = 400):
-        super().__init__(message)
-        self.status = status
 
 
 class Database:
     def __init__(self, path: str | os.PathLike[str] = DEFAULT_DB):
         self.path = str(path)
+        self.reversals = ReversalStore(self)
+        self.corrections = CorrectionService(self)
         self._init_schema()
 
     def connect(self) -> sqlite3.Connection:
@@ -84,6 +71,16 @@ class Database:
                     created_at TEXT NOT NULL,
                     UNIQUE(account_id, meter_event_id)
                 );
+                CREATE TABLE IF NOT EXISTS usage_reversals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    usage_id INTEGER NOT NULL REFERENCES usage_records(id),
+                    account_id INTEGER NOT NULL REFERENCES accounts(id),
+                    amount REAL NOT NULL CHECK(amount > 0),
+                    reason TEXT NOT NULL,
+                    operator TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_reversals_usage ON usage_reversals(usage_id);
                 CREATE TABLE IF NOT EXISTS season_rules (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     region TEXT NOT NULL,
@@ -320,10 +317,7 @@ class Database:
             if amount > available + 1e-9:
                 raise DomainError("取水超过可用额度", 409)
             season = conn.execute("SELECT max_fraction FROM season_rules WHERE region=? AND month=?", (account["region"], occurred.month)).fetchone()
-            month_total = conn.execute(
-                "SELECT COALESCE(SUM(amount),0) total FROM usage_records WHERE account_id=? AND substr(occurred_at,1,7)=?",
-                (account_id, occurred.strftime("%Y-%m")),
-            ).fetchone()["total"]
+            month_total = self.reversals.net_month_usage(conn, account_id, occurred.strftime("%Y-%m"))
             if season:
                 cap = float(account["quota"]) * float(season["max_fraction"])
                 if float(month_total) + amount > cap + 1e-9:
@@ -340,6 +334,12 @@ class Database:
                         {"amount": amount, "occurred_at": occurred.isoformat(), "meter_event_id": meter_event_id})
             row = conn.execute("SELECT * FROM usage_records WHERE id=?", (cur.lastrowid,)).fetchone()
         return dict(row)
+
+    def reverse_usage(self, actor: str, payload: dict[str, Any], role: str = "meter") -> dict[str, Any]:
+        return self.corrections.reverse_usage(actor, payload, role)
+
+    def usage_ledger(self, account_id: int | None = None) -> list[dict[str, Any]]:
+        return self.reversals.usage_ledger(account_id)
 
     def simulate_drought(self, total_supply: float, reduction: float = 0.0, role: str = "viewer") -> dict[str, Any]:
         try:
@@ -459,6 +459,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send({"accounts": self.db.list_accounts()})
             if parsed.path == "/api/transfers":
                 return self._send({"transfers": self.db.list_transfers()})
+            if parsed.path == "/api/usage":
+                q = parse_qs(parsed.query)
+                account_id = int(q["account_id"][0]) if "account_id" in q else None
+                return self._send({"ledger": self.db.usage_ledger(account_id)})
             if parsed.path == "/api/audit":
                 return self._send({"audit": self.db.audit()})
             if parsed.path.startswith("/api/accounts/") and parsed.path.endswith("/available"):
@@ -491,6 +495,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(self.db.reject_transfer(int(parts[2]), actor, role))
             if parts == ["api", "usage"]:
                 return self._send(self.db.record_usage(actor, body, role), 201)
+            if parts == ["api", "usage", "reverse"]:
+                return self._send(self.db.reverse_usage(actor, body, role), 201)
             raise DomainError("接口不存在", 404)
         except (ValueError, TypeError, DomainError) as exc:
             self._send({"error": str(exc)}, getattr(exc, "status", 400))
