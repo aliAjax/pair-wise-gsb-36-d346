@@ -6,18 +6,18 @@ import calendar
 import json
 import os
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import reversal_store
+from common import DomainError, utcnow
+from reversal_service import ReversalService
+
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DB = ROOT / "water_rights.db"
-
-
-def utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def parse_date(value: str, field: str = "日期") -> date:
@@ -25,12 +25,6 @@ def parse_date(value: str, field: str = "日期") -> date:
         return date.fromisoformat(value)
     except (TypeError, ValueError) as exc:
         raise DomainError(f"{field}必须是 YYYY-MM-DD") from exc
-
-
-class DomainError(Exception):
-    def __init__(self, message: str, status: int = 400):
-        super().__init__(message)
-        self.status = status
 
 
 class Database:
@@ -111,6 +105,7 @@ class Database:
                 );
                 """
             )
+            reversal_store.ensure_schema(conn)
 
     def _audit(self, conn: sqlite3.Connection, actor: str, action: str, entity_type: str,
                entity_id: int | None, details: dict[str, Any]) -> None:
@@ -320,10 +315,8 @@ class Database:
             if amount > available + 1e-9:
                 raise DomainError("取水超过可用额度", 409)
             season = conn.execute("SELECT max_fraction FROM season_rules WHERE region=? AND month=?", (account["region"], occurred.month)).fetchone()
-            month_total = conn.execute(
-                "SELECT COALESCE(SUM(amount),0) total FROM usage_records WHERE account_id=? AND substr(occurred_at,1,7)=?",
-                (account_id, occurred.strftime("%Y-%m")),
-            ).fetchone()["total"]
+            # 当月季节用量按净额判定：已登记取水减去已确认冲正
+            month_total = reversal_store.month_net_usage(conn, account_id, occurred.strftime("%Y-%m"))
             if season:
                 cap = float(account["quota"]) * float(season["max_fraction"])
                 if float(month_total) + amount > cap + 1e-9:
@@ -418,6 +411,7 @@ def seed_demo(db: Database) -> dict[str, int]:
 
 class Handler(BaseHTTPRequestHandler):
     db: Database
+    reversal_service: ReversalService
     server_version = "WaterRights/1.0"
 
     def _send(self, payload: Any, status: int = 200) -> None:
@@ -428,8 +422,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _html(self) -> None:
-        data = (ROOT / "static" / "index.html").read_bytes()
+    def _html(self, name: str = "index.html") -> None:
+        data = (ROOT / "static" / name).read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -453,10 +447,14 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path in {"/", "/index.html"}:
                 return self._html()
+            if parsed.path == "/reversals":
+                return self._html("reversals.html")
             if parsed.path == "/api/health":
                 return self._send({"ok": True})
             if parsed.path == "/api/accounts":
                 return self._send({"accounts": self.db.list_accounts()})
+            if parsed.path == "/api/reversals":
+                return self._send({"accounts": self.reversal_service.list_by_account()})
             if parsed.path == "/api/transfers":
                 return self._send({"transfers": self.db.list_transfers()})
             if parsed.path == "/api/audit":
@@ -489,6 +487,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(self.db.approve_transfer(int(parts[2]), actor, role))
             if len(parts) == 4 and parts[:2] == ["api", "transfers"] and parts[3] == "reject":
                 return self._send(self.db.reject_transfer(int(parts[2]), actor, role))
+            if len(parts) == 4 and parts[:2] == ["api", "usage"] and parts[3] == "reversals":
+                return self._send(self.reversal_service.create_reversal(int(parts[2]), actor, body, role), 201)
             if parts == ["api", "usage"]:
                 return self._send(self.db.record_usage(actor, body, role), 201)
             raise DomainError("接口不存在", 404)
@@ -511,6 +511,7 @@ def main() -> None:
         print(f"initialized database at {args.db}")
         return
     Handler.db = db
+    Handler.reversal_service = ReversalService(db)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"water-rights listening on http://127.0.0.1:{args.port} (db={args.db})")
     server.serve_forever()

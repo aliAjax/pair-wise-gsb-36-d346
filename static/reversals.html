@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>计量冲正</title>
+<style>
+body{font:15px/1.5 system-ui,sans-serif;max-width:1040px;margin:32px auto;padding:0 18px}
+input,select,button{padding:7px;margin:3px}
+.card{border:1px solid #d9e1e8;border-radius:10px;padding:16px;margin:16px 0}
+pre{background:#f5f7f9;padding:12px;overflow:auto}
+small{color:#667}button{cursor:pointer}
+details{border:1px solid #d9e1e8;border-radius:8px;padding:10px 14px;margin:10px 0}
+summary{cursor:pointer;font-weight:600}
+table{border-collapse:collapse;margin-top:8px;width:100%}
+td,th{border:1px solid #d9e1e8;padding:5px 9px;text-align:right}
+th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left}
+.rev{margin:3px 0;font-size:13px}
+</style></head>
+<body>
+<h1>计量冲正</h1>
+<p>对同一水泵重复登记等错误取水单，从原取水记录发起冲正：同一记录可分次冲回，累计不能超过原取水量；确认后立即减少账户已用水量与当月季节用量。审计保留原单、冲正单和剩余可冲量。</p>
+<div class="card"><h2>身份</h2><input id="user" value="meter-01"><select id="role"><option selected>meter</option><option>editor</option><option>reviewer</option><option>viewer</option></select> <a href="/">返回首页</a></div>
+<div class="card"><h2>取水记录（按账户展开）</h2><button onclick="loadAll()">刷新</button><div id="tree">加载中…</div></div>
+<div class="card" id="formcard" style="display:none"><h2>发起冲正</h2>
+<div id="forminfo" class="rev"></div>
+冲正量 <input id="amount" type="number" step="0.01" min="0" placeholder="分次冲回量">
+原因 <input id="reason" placeholder="如：同一水泵重复登记" size="26">
+经办人 <input id="handler" placeholder="经办人">
+<button onclick="submitReversal()">确认冲正</button>
+<pre id="result"></pre></div>
+<script>
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const headers=()=>({'Content-Type':'application/json','X-User':user.value,'X-Role':role.value});
+let current=null;
+async function call(url,opts={}){const r=await fetch(url,opts);const j=await r.json();if(!r.ok)throw Error(j.error||r.status);return j}
+async function loadAll(){
+  try{
+    const j=await call('/api/reversals');
+    tree.innerHTML='';
+    if(!j.accounts.length){tree.textContent='暂无取水记录';return}
+    for(const a of j.accounts){
+      const det=document.createElement('details');det.open=true;
+      det.innerHTML=`<summary>${esc(a.name)}（${esc(a.region)}，${esc(a.holder)}）— ${a.usage.length} 条取水记录</summary>`;
+      const tbl=document.createElement('table');
+      tbl.innerHTML='<tr><th>事件编号</th><th>取水日期</th><th>原取水量</th><th>已冲回</th><th>剩余可冲</th><th>操作</th></tr>';
+      for(const u of a.usage){
+        const tr=document.createElement('tr');
+        tr.innerHTML=`<td>${esc(u.meter_event_id)}</td><td>${esc(u.occurred_at)}</td><td>${u.amount}</td><td>${u.reversed_total}</td><td>${u.remaining_reversible}</td>`;
+        const td=document.createElement('td');
+        if(u.remaining_reversible>0){const b=document.createElement('button');b.textContent='冲正';b.onclick=()=>openForm(a,u);td.appendChild(b);}
+        tr.appendChild(td);tbl.appendChild(tr);
+        if(u.reversals.length){
+          const sub=document.createElement('tr'),cell=document.createElement('td');cell.colSpan=6;
+          cell.innerHTML='<small>冲正单：</small>'+u.reversals.map(r=>`<div class="rev">#${r.id} 冲回 ${r.amount} ｜ 原因：${esc(r.reason)} ｜ 经办人：${esc(r.handler)} ｜ ${esc(r.created_at)}</div>`).join('');
+          sub.appendChild(cell);tbl.appendChild(sub);
+        }
+      }
+      det.appendChild(tbl);tree.appendChild(det);
+    }
+  }catch(e){tree.textContent=e.message}
+}
+function openForm(a,u){
+  current=u;
+  formcard.style.display='block';
+  forminfo.textContent=`账户：${a.name} ｜ 原单 #${u.id} 事件编号：${u.meter_event_id} ｜ 原取水量：${u.amount} ｜ 已冲回：${u.reversed_total} ｜ 剩余可冲：${u.remaining_reversible}`;
+  amount.value='';amount.max=u.remaining_reversible;
+  reason.value='';handler.value=user.value;result.textContent='';
+}
+async function submitReversal(){
+  try{
+    const j=await call('/api/usage/'+current.id+'/reversals',{method:'POST',headers:headers(),
+      body:JSON.stringify({amount:+amount.value,reason:reason.value,handler:handler.value})});
+    result.textContent='冲正成功：\n'+JSON.stringify(j,null,2);
+    loadAll();
+  }catch(e){result.textContent=e.message}
+}
+loadAll();
+</script></body></html>
